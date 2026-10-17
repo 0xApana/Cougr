@@ -108,7 +108,7 @@ impl MultiDeviceProvider for DeviceManager {
         // Check for duplicate active key_id and count active devices
         let mut active_count: u32 = 0;
         let mut revoked_index: Option<usize> = None;
-        
+
         for i in 0..devices.len() {
             if let Some(d) = devices.get(i) {
                 if d.key_id == key_id {
@@ -140,7 +140,7 @@ impl MultiDeviceProvider for DeviceManager {
         };
 
         let mut new_devices: Vec<DeviceKey> = Vec::new(env);
-        
+
         if let Some(revoked_idx) = revoked_index {
             // Reuse the revoked entry by replacing it
             for i in 0..devices.len() {
@@ -155,7 +155,7 @@ impl MultiDeviceProvider for DeviceManager {
             new_devices = devices;
             new_devices.push_back(device.clone());
         }
-        
+
         DeviceStorage::store_devices(env, &self.address, &new_devices);
         Ok(device)
     }
@@ -163,7 +163,7 @@ impl MultiDeviceProvider for DeviceManager {
     fn revoke_device(&mut self, env: &Env, key_id: &BytesN<32>) -> Result<(), AccountError> {
         let devices = DeviceStorage::load_devices(env, &self.address);
         let mut found_active = false;
-        
+
         // First check if the device exists and is active
         for i in 0..devices.len() {
             if let Some(d) = devices.get(i) {
@@ -178,11 +178,11 @@ impl MultiDeviceProvider for DeviceManager {
                 }
             }
         }
-        
+
         if !found_active {
             return Err(AccountError::DeviceNotFound);
         }
-        
+
         DeviceStorage::update_device(env, &self.address, key_id, |d| {
             d.is_active = false;
         })
@@ -260,8 +260,9 @@ impl MultiDeviceProvider for DeviceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{contract, contractimpl, symbol_short, testutils::Address as _, Env};
+    use crate::accounts::policy::{ActiveDevicePolicy, DeviceContext, Policy};
     use soroban_sdk::testutils::Ledger;
+    use soroban_sdk::{contract, contractimpl, symbol_short, testutils::Address as _, Env};
 
     #[contract]
     pub struct TestContract;
@@ -490,7 +491,7 @@ mod tests {
         let addr = Address::generate(&env);
 
         env.as_contract(&contract_id, || {
-            let mut manager = DeviceManager::new(addr, default_policy(), &env);
+            let mut manager = DeviceManager::new(addr.clone(), default_policy(), &env);
             let key_id = BytesN::from_array(&env, &[1u8; 32]);
 
             // Register, revoke, then register the SAME key again
@@ -506,9 +507,33 @@ mod tests {
                 .unwrap();
             assert_eq!(manager.active_device_count(&env), 1);
 
+            // After re-register, ActiveDevicePolicy must accept the key
+            let device_policy = ActiveDevicePolicy;
+            device_policy
+                .evaluate(
+                    &env,
+                    &DeviceContext {
+                        account: &addr,
+                        key_id: &key_id,
+                    },
+                )
+                .unwrap();
+
             // Now revoke again - should work
             manager.revoke_device(&env, &key_id).unwrap();
             assert_eq!(manager.active_device_count(&env), 0);
+
+            // After second revoke, ActiveDevicePolicy must reject the key
+            assert_eq!(
+                device_policy.evaluate(
+                    &env,
+                    &DeviceContext {
+                        account: &addr,
+                        key_id: &key_id,
+                    },
+                ),
+                Err(AccountError::DeviceNotFound)
+            );
         });
     }
 
