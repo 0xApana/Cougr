@@ -164,17 +164,12 @@ impl MultiDeviceProvider for DeviceManager {
         let devices = DeviceStorage::load_devices(env, &self.address);
         let mut found_active = false;
 
-        // First check if the device exists and is active
+        // Search for an active entry with this key_id
         for i in 0..devices.len() {
             if let Some(d) = devices.get(i) {
-                if &d.key_id == key_id {
-                    if d.is_active {
-                        found_active = true;
-                        break;
-                    } else {
-                        // Found but already revoked
-                        return Err(AccountError::DeviceNotFound);
-                    }
+                if &d.key_id == key_id && d.is_active {
+                    found_active = true;
+                    break;
                 }
             }
         }
@@ -657,6 +652,60 @@ mod tests {
             let revoked = manager.cleanup_inactive(&env);
             assert_eq!(revoked, 1);
             assert_eq!(manager.active_device_count(&env), 0);
+        });
+    }
+
+    #[test]
+    fn test_revoke_with_stale_duplicate_in_storage() {
+        let env = Env::default();
+        let contract_id = env.register(TestContract, ());
+        let addr = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            // Simulate legacy state: stale revoked entry followed by live active entry
+            let key_id = BytesN::from_array(&env, &[1u8; 32]);
+            let mut devices = Vec::new(&env);
+
+            // Stale entry (revoked)
+            devices.push_back(DeviceKey {
+                key_id: key_id.clone(),
+                device_name: symbol_short!("old"),
+                registered_at: 0,
+                last_used: 0,
+                is_active: false,
+            });
+
+            // Live entry (active)
+            devices.push_back(DeviceKey {
+                key_id: key_id.clone(),
+                device_name: symbol_short!("new"),
+                registered_at: 0,
+                last_used: 0,
+                is_active: true,
+            });
+
+            DeviceStorage::store_devices(&env, &addr, &devices);
+
+            let mut manager = DeviceManager::load(addr.clone());
+
+            // revoke_device should succeed and target the active entry
+            manager.revoke_device(&env, &key_id).unwrap();
+
+            // Active count should now be 0
+            assert_eq!(manager.active_device_count(&env), 0);
+
+            // ActiveDevicePolicy should reject the key
+            let device_policy = ActiveDevicePolicy;
+            assert_eq!(
+                device_policy.evaluate(
+                    &env,
+                    &DeviceContext {
+                        account: &addr,
+                        key_id: &key_id,
+                    },
+                ),
+                Err(AccountError::DeviceNotFound)
+            );
         });
     }
 }
